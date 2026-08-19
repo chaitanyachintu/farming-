@@ -1,21 +1,40 @@
-import streamlit as st
+import os
 import sqlite3
-import pandas as pd
 from datetime import date
+
+import pandas as pd
+import streamlit as st
 from ollama import Client
 
 
 # ============================================================
 # SMART FARM MANAGEMENT
-# LOCAL AI + GENERAL AI + FARM AI
+# OLLAMA CLOUD AI + GENERAL AI + FARM AI
 # ============================================================
 
 DB_NAME = "farm_data.db"
 
-OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_HOST = "https://ollama.com"
 
-AI_MODEL = "llama3.2:1b"
+AI_MODEL = "gpt-oss:20b"
 
+
+# ============================================================
+# OLLAMA API KEY
+# ============================================================
+
+# Streamlit Cloud uses st.secrets.
+# Environment variable is kept as a fallback for local testing.
+
+try:
+    OLLAMA_API_KEY = st.secrets["OLLAMA_API_KEY"]
+except Exception:
+    OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
+
+
+# ============================================================
+# LOCATIONS
+# ============================================================
 
 LOCATIONS = [
     "Jawalgiri",
@@ -23,6 +42,10 @@ LOCATIONS = [
     "Jakali"
 ]
 
+
+# ============================================================
+# CATEGORIES
+# ============================================================
 
 CATEGORIES = [
     "Crop Farming",
@@ -53,6 +76,10 @@ CATEGORIES = [
 ]
 
 
+# ============================================================
+# UNITS
+# ============================================================
+
 UNITS = [
     "kg",
     "litre",
@@ -67,15 +94,42 @@ UNITS = [
 
 
 # ============================================================
-# OLLAMA
+# PAGE SETTINGS
+# ============================================================
+
+st.set_page_config(
+    page_title="Smart Farm Management",
+    page_icon="🌱",
+    layout="wide"
+)
+
+
+# ============================================================
+# OLLAMA CLOUD
 # ============================================================
 
 def get_ai_client():
 
+    if not OLLAMA_API_KEY:
+
+        raise RuntimeError(
+            "OLLAMA_API_KEY is missing.\n\n"
+            "Go to Streamlit Cloud → Settings → Secrets "
+            "and add:\n\n"
+            'OLLAMA_API_KEY = "your_api_key_here"'
+        )
+
     return Client(
-        host=OLLAMA_HOST
+        host=OLLAMA_HOST,
+        headers={
+            "Authorization": f"Bearer {OLLAMA_API_KEY}"
+        }
     )
 
+
+# ============================================================
+# CHECK AI CONNECTION
+# ============================================================
 
 def check_ai():
 
@@ -83,13 +137,13 @@ def check_ai():
 
         client = get_ai_client()
 
-        models = client.list()
+        client.list()
 
-        return True
+        return True, "Connected successfully."
 
-    except Exception:
+    except Exception as e:
 
-        return False
+        return False, str(e)
 
 
 # ============================================================
@@ -137,6 +191,7 @@ def create_database():
         "income": "REAL",
         "expense": "REAL",
         "notes": "TEXT"
+
     }
 
     for column, data_type in required_columns.items():
@@ -321,9 +376,7 @@ Use Indian Rupees (₹) when appropriate.
         })
 
         response = client.chat(
-
             model=AI_MODEL,
-
             messages=messages
         )
 
@@ -332,11 +385,10 @@ Use Indian Rupees (₹) when appropriate.
     except Exception as e:
 
         return (
-            "❌ Local AI Error\n\n"
+            "❌ General AI Error\n\n"
             f"{str(e)}\n\n"
-            "Make sure Ollama is installed and running "
-            "and the model exists:\n\n"
-            f"ollama pull {AI_MODEL}"
+            "Please check your Ollama Cloud API "
+            "key and model configuration."
         )
 
 
@@ -366,7 +418,7 @@ def ask_farm_ai(
         df = df.fillna("")
 
         # ----------------------------------------------------
-        # Convert numeric fields
+        # Convert numeric columns
         # ----------------------------------------------------
 
         df["income"] = pd.to_numeric(
@@ -392,7 +444,10 @@ def ask_farm_ai(
 
         total_expense = df["expense"].sum()
 
-        profit = total_income - total_expense
+        profit = (
+            total_income -
+            total_expense
+        )
 
         total_records = len(df)
 
@@ -410,7 +465,8 @@ def ask_farm_ai(
 
         category_summary["Profit"] = (
             category_summary["Income"]
-            - category_summary["Expense"]
+            -
+            category_summary["Expense"]
         )
 
         # ----------------------------------------------------
@@ -426,7 +482,7 @@ def ask_farm_ai(
         )
 
         # ----------------------------------------------------
-        # Messages
+        # Farm AI system message
         # ----------------------------------------------------
 
         messages = [
@@ -436,22 +492,23 @@ def ask_farm_ai(
                 "content": f"""
 You are Farm AI inside a Smart Farm Management System.
 
-CURRENT LOCATION:
+CURRENT FARM LOCATION:
 {location}
 
-You have access ONLY to the records provided below.
+You have access ONLY to the farm records
+provided below.
 
-IMPORTANT:
+IMPORTANT RULES:
 
-- Never invent farm figures.
-- Use the actual records.
-- Calculate totals when needed.
-- Use ₹ for Indian currency.
-- Clearly explain calculations.
-- If information is unavailable, say so.
-- You can give recommendations, but clearly label them
-  as recommendations.
-- Do not use records from other farm locations.
+1. Never invent farm figures.
+2. Use the actual records.
+3. Calculate totals when required.
+4. Use ₹ for Indian currency.
+5. Clearly explain calculations.
+6. If information is unavailable, say so.
+7. Recommendations must be clearly identified
+   as recommendations.
+8. Never use records from another location.
 
 FARM TOTALS:
 
@@ -473,7 +530,7 @@ CATEGORY SUMMARY:
 {summary_text}
 
 
-DETAILED RECORDS:
+DETAILED FARM RECORDS:
 
 {records_text}
 """
@@ -494,9 +551,7 @@ DETAILED RECORDS:
         })
 
         response = client.chat(
-
             model=AI_MODEL,
-
             messages=messages
         )
 
@@ -507,26 +562,13 @@ DETAILED RECORDS:
         return (
             "❌ Farm AI Error\n\n"
             f"{str(e)}\n\n"
-            "Make sure Ollama is running."
+            "Please check your Ollama Cloud API "
+            "key and model configuration."
         )
 
 
 # ============================================================
-# PAGE SETTINGS
-# ============================================================
-
-st.set_page_config(
-
-    page_title="Smart Farm Management",
-
-    page_icon="🌱",
-
-    layout="wide"
-)
-
-
-# ============================================================
-# DATABASE
+# CREATE DATABASE
 # ============================================================
 
 create_database()
@@ -709,33 +751,44 @@ if menu == "🤖 AI Assistant":
     )
 
     # --------------------------------------------------------
-    # AI Status
+    # AI STATUS
     # --------------------------------------------------------
 
-    if check_ai():
+    ai_ok, ai_message = check_ai()
+
+    if ai_ok:
 
         st.success(
-            f"🟢 Local AI is running — {AI_MODEL}"
+            f"🟢 AI is connected — {AI_MODEL}"
         )
 
     else:
 
         st.error(
-            "🔴 Ollama is not running."
+            "🔴 AI connection failed."
+        )
+
+        st.warning(
+            "Check your Ollama API configuration."
         )
 
         st.code(
-            f"ollama run {AI_MODEL}",
-            language="powershell"
+            ai_message,
+            language="text"
+        )
+
+        st.info(
+            "In Streamlit Cloud, go to "
+            "Settings → Secrets and make sure "
+            "OLLAMA_API_KEY is configured."
         )
 
         st.stop()
 
-
     st.divider()
 
     # --------------------------------------------------------
-    # Mode
+    # AI MODE
     # --------------------------------------------------------
 
     ai_mode = st.radio(
@@ -750,9 +803,7 @@ if menu == "🤖 AI Assistant":
         horizontal=True
     )
 
-
     st.divider()
-
 
     # ========================================================
     # GENERAL AI
@@ -769,7 +820,6 @@ if menu == "🤖 AI Assistant":
             "your farm records."
         )
 
-
         for message in (
             st.session_state.general_ai_messages
         ):
@@ -782,11 +832,9 @@ if menu == "🤖 AI Assistant":
                     message["content"]
                 )
 
-
         question = st.chat_input(
             "Ask General AI anything..."
         )
-
 
         if question:
 
@@ -795,7 +843,6 @@ if menu == "🤖 AI Assistant":
             ):
 
                 st.write(question)
-
 
             with st.chat_message(
                 "assistant"
@@ -806,38 +853,29 @@ if menu == "🤖 AI Assistant":
                 ):
 
                     answer = ask_general_ai(
-
                         question,
-
-                        st.session_state
-                        .general_ai_messages
+                        st.session_state.general_ai_messages
                     )
 
                 st.write(answer)
 
+            st.session_state.general_ai_messages.append(
+                {
+                    "role": "user",
+                    "content": question
+                }
+            )
 
-            st.session_state.general_ai_messages.append({
-
-                "role": "user",
-
-                "content": question
-
-            })
-
-
-            st.session_state.general_ai_messages.append({
-
-                "role": "assistant",
-
-                "content": answer
-
-            })
+            st.session_state.general_ai_messages.append(
+                {
+                    "role": "assistant",
+                    "content": answer
+                }
+            )
 
             st.rerun()
 
-
         st.divider()
-
 
         if st.button(
             "🗑️ Clear General AI Chat",
@@ -847,7 +885,6 @@ if menu == "🤖 AI Assistant":
             st.session_state.general_ai_messages = []
 
             st.rerun()
-
 
     # ========================================================
     # FARM AI
@@ -869,7 +906,6 @@ if menu == "🤖 AI Assistant":
             "categories, activities and farm performance."
         )
 
-
         for message in (
             st.session_state.farm_ai_messages
         ):
@@ -882,13 +918,10 @@ if menu == "🤖 AI Assistant":
                     message["content"]
                 )
 
-
         question = st.chat_input(
-
             f"Ask Farm AI about "
             f"{current_location}..."
         )
-
 
         if question:
 
@@ -897,7 +930,6 @@ if menu == "🤖 AI Assistant":
             ):
 
                 st.write(question)
-
 
             with st.chat_message(
                 "assistant"
@@ -908,40 +940,30 @@ if menu == "🤖 AI Assistant":
                 ):
 
                     answer = ask_farm_ai(
-
                         question,
-
                         current_location,
-
-                        st.session_state
-                        .farm_ai_messages
+                        st.session_state.farm_ai_messages
                     )
 
                 st.write(answer)
 
+            st.session_state.farm_ai_messages.append(
+                {
+                    "role": "user",
+                    "content": question
+                }
+            )
 
-            st.session_state.farm_ai_messages.append({
-
-                "role": "user",
-
-                "content": question
-
-            })
-
-
-            st.session_state.farm_ai_messages.append({
-
-                "role": "assistant",
-
-                "content": answer
-
-            })
+            st.session_state.farm_ai_messages.append(
+                {
+                    "role": "assistant",
+                    "content": answer
+                }
+            )
 
             st.rerun()
 
-
         st.divider()
-
 
         if st.button(
             "🗑️ Clear Farm AI Chat",
@@ -986,7 +1008,6 @@ elif menu == "📊 Dashboard":
             errors="coerce"
         ).fillna(0)
 
-
         total_income = df["income"].sum()
 
         total_expense = df["expense"].sum()
@@ -998,85 +1019,62 @@ elif menu == "📊 Dashboard":
 
         total_records = len(df)
 
-
         col1, col2, col3, col4 = st.columns(4)
-
 
         col1.metric(
             "💰 Total Income",
             f"₹{total_income:,.2f}"
         )
 
-
         col2.metric(
             "💸 Total Expenses",
             f"₹{total_expense:,.2f}"
         )
-
 
         col3.metric(
             "📈 Profit / Loss",
             f"₹{profit:,.2f}"
         )
 
-
         col4.metric(
             "📝 Total Records",
             total_records
         )
 
-
         st.divider()
-
 
         st.subheader(
             "📂 Category Summary"
         )
 
-
         category_summary = df.groupby(
             "category"
         ).agg(
-
             Income=("income", "sum"),
-
             Expense=("expense", "sum")
-
         ).reset_index()
 
-
         category_summary["Profit"] = (
-
             category_summary["Income"]
-
             -
-
             category_summary["Expense"]
-
         )
-
 
         st.dataframe(
-
             category_summary,
-
             use_container_width=True,
-
             hide_index=True
         )
-
 
         st.subheader(
             "📊 Income vs Expense"
         )
-
 
         chart_data = (
             category_summary
             .set_index("category")
             [["Income", "Expense"]]
         )
-
 
         st.bar_chart(
             chart_data
@@ -1093,7 +1091,6 @@ elif menu == "➕ Add Record":
         f"➕ Add Record - {current_location}"
     )
 
-
     with st.form(
         "farm_record_form"
     ):
@@ -1103,12 +1100,10 @@ elif menu == "➕ Add Record":
             value=date.today()
         )
 
-
         category = st.selectbox(
             "Farming Category",
             CATEGORIES
         )
-
 
         item = st.text_input(
             "Item / Activity",
@@ -1118,9 +1113,7 @@ elif menu == "➕ Add Record":
             )
         )
 
-
         col1, col2 = st.columns(2)
-
 
         with col1:
 
@@ -1131,7 +1124,6 @@ elif menu == "➕ Add Record":
                 step=1.0
             )
 
-
         with col2:
 
             unit = st.selectbox(
@@ -1139,9 +1131,7 @@ elif menu == "➕ Add Record":
                 UNITS
             )
 
-
         col3, col4 = st.columns(2)
-
 
         with col3:
 
@@ -1152,7 +1142,6 @@ elif menu == "➕ Add Record":
                 step=100.0
             )
 
-
         with col4:
 
             expense = st.number_input(
@@ -1162,7 +1151,6 @@ elif menu == "➕ Add Record":
                 step=100.0
             )
 
-
         notes = st.text_area(
             "Notes",
             placeholder=(
@@ -1170,12 +1158,10 @@ elif menu == "➕ Add Record":
             )
         )
 
-
         submitted = st.form_submit_button(
             "💾 Save Record",
             use_container_width=True
         )
-
 
         if submitted:
 
@@ -1188,23 +1174,14 @@ elif menu == "➕ Add Record":
             else:
 
                 add_record(
-
                     current_location,
-
                     str(record_date),
-
                     category,
-
                     item,
-
                     quantity,
-
                     unit,
-
                     income,
-
                     expense,
-
                     notes
                 )
 
@@ -1224,11 +1201,9 @@ elif menu == "📋 View Records":
         f"📋 Records - {current_location}"
     )
 
-
     df = get_records(
         current_location
     )
-
 
     if df.empty:
 
@@ -1237,39 +1212,28 @@ elif menu == "📋 View Records":
             f"{current_location}."
         )
 
-
     else:
 
         st.subheader(
             "All Records"
         )
 
-
         st.dataframe(
-
             df,
-
             use_container_width=True,
-
             hide_index=True
         )
 
-
         st.divider()
-
 
         st.subheader(
             "🔎 Filter Records"
         )
 
-
         selected_category = st.selectbox(
-
             "Select Category",
-
             ["All Categories"] + CATEGORIES
         )
-
 
         if selected_category == "All Categories":
 
@@ -1278,36 +1242,25 @@ elif menu == "📋 View Records":
         else:
 
             filtered_df = df[
-                df["category"] ==
-                selected_category
+                df["category"] == selected_category
             ]
 
-
         st.dataframe(
-
             filtered_df,
-
             use_container_width=True,
-
             hide_index=True
         )
 
-
         st.download_button(
-
             label="📥 Download Records as CSV",
-
             data=filtered_df.to_csv(
                 index=False
             ),
-
             file_name=(
                 f"{current_location}"
                 "_farm_records.csv"
             ),
-
             mime="text/csv",
-
             use_container_width=True
         )
 
@@ -1323,11 +1276,9 @@ elif menu == "🗑️ Delete Record":
         f"{current_location}"
     )
 
-
     df = get_records(
         current_location
     )
-
 
     if df.empty:
 
@@ -1336,44 +1287,30 @@ elif menu == "🗑️ Delete Record":
             f"for {current_location}."
         )
 
-
     else:
 
         st.subheader(
             "Existing Records"
         )
 
-
         st.dataframe(
-
             df,
-
             use_container_width=True,
-
             hide_index=True
         )
 
-
         st.divider()
 
-
         record_id = st.number_input(
-
             "Enter Record ID to Delete",
-
             min_value=1,
-
             step=1
         )
 
-
         if st.button(
-
             "🗑️ Delete Record",
-
             use_container_width=True
         ):
-
 
             if record_id in df["id"].values:
 
@@ -1387,7 +1324,6 @@ elif menu == "🗑️ Delete Record":
                 )
 
                 st.rerun()
-
 
             else:
 
@@ -1404,7 +1340,7 @@ st.sidebar.divider()
 
 st.sidebar.info(
     "🌱 Smart Farm Management\n\n"
-    "🤖 Local General AI\n\n"
-    "🌱 Local Farm AI\n\n"
+    "🤖 Ollama Cloud General AI\n\n"
+    "🌱 Ollama Cloud Farm AI\n\n"
     "💾 SQLite Database"
 )
