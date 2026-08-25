@@ -17,7 +17,7 @@ DB_NAME = "farm_data.db"
 OLLAMA_API_URL = "https://ollama.com/api/chat"
 
 # Cloud model
-AI_MODEL = "gpt-oss:20b-cloud"
+AI_MODEL = "gpt-oss:20b"
 
 
 # ============================================================
