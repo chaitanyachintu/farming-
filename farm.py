@@ -133,7 +133,17 @@ def get_ollama_api_key():
         key = st.secrets.get("OLLAMA_API_KEY")
 
         if key:
-            return str(key).strip()
+            key = str(key).strip()
+
+            # Remove accidental Bearer prefix if the user pasted one.
+            if key.lower().startswith("bearer "):
+                key = key[7:].strip()
+
+            # Remove accidental surrounding quotes.
+            if len(key) >= 2 and key[0] == key[-1] and key[0] in ('"', "'"):
+                key = key[1:-1].strip()
+
+            return key
 
     except Exception:
         pass
@@ -142,7 +152,15 @@ def get_ollama_api_key():
     key = os.getenv("OLLAMA_API_KEY")
 
     if key:
-        return key.strip()
+        key = key.strip()
+
+        if key.lower().startswith("bearer "):
+            key = key[7:].strip()
+
+        if len(key) >= 2 and key[0] == key[-1] and key[0] in ('"', "'"):
+            key = key[1:-1].strip()
+
+        return key
 
     return ""
 
@@ -196,11 +214,14 @@ def ask_ollama(prompt, system_prompt=None):
 
         # Authentication error
         if response.status_code == 401:
+            try:
+                error_data = response.json()
+                error_message = error_data.get("error", response.text)
+            except Exception:
+                error_message = response.text
 
             raise RuntimeError(
-                "Ollama Cloud returned 401 Unauthorized. "
-                "Your OLLAMA_API_KEY is invalid, expired, "
-                "or incorrectly configured."
+                f"Ollama authentication failed (HTTP 401): {error_message}"
             )
 
         # Other errors
