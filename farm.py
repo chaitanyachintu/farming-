@@ -1,35 +1,23 @@
-import os
-import sqlite3
-from datetime import date
-
-import pandas as pd
 import streamlit as st
-from ollama import Client
+import sqlite3
+import pandas as pd
+import requests
+import os
+from datetime import date
 
 
 # ============================================================
 # SMART FARM MANAGEMENT
-# OLLAMA CLOUD AI + GENERAL AI + FARM AI
+# STREAMLIT CLOUD + OLLAMA CLOUD
 # ============================================================
 
 DB_NAME = "farm_data.db"
 
-OLLAMA_HOST = "https://ollama.com"
+# Ollama Cloud
+OLLAMA_API_URL = "https://ollama.com/api/chat"
 
-AI_MODEL = "gpt-oss:20b"
-
-
-# ============================================================
-# OLLAMA API KEY
-# ============================================================
-
-# Streamlit Cloud uses st.secrets.
-# Environment variable is kept as a fallback for local testing.
-
-try:
-    OLLAMA_API_KEY = st.secrets["OLLAMA_API_KEY"]
-except Exception:
-    OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
+# Cloud model
+AI_MODEL = "gpt-oss:20b-cloud"
 
 
 # ============================================================
@@ -44,7 +32,7 @@ LOCATIONS = [
 
 
 # ============================================================
-# CATEGORIES
+# FARM CATEGORIES
 # ============================================================
 
 CATEGORIES = [
@@ -77,24 +65,7 @@ CATEGORIES = [
 
 
 # ============================================================
-# UNITS
-# ============================================================
-
-UNITS = [
-    "kg",
-    "litre",
-    "number",
-    "acre",
-    "hour",
-    "day",
-    "room",
-    "meal",
-    "other"
-]
-
-
-# ============================================================
-# PAGE SETTINGS
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -105,62 +76,24 @@ st.set_page_config(
 
 
 # ============================================================
-# OLLAMA CLOUD
-# ============================================================
-
-def get_ai_client():
-
-    if not OLLAMA_API_KEY:
-
-        raise RuntimeError(
-            "OLLAMA_API_KEY is missing.\n\n"
-            "Go to Streamlit Cloud → Settings → Secrets "
-            "and add:\n\n"
-            'OLLAMA_API_KEY = "your_api_key_here"'
-        )
-
-    return Client(
-        host=OLLAMA_HOST,
-        headers={
-            "Authorization": f"Bearer {OLLAMA_API_KEY}"
-        }
-    )
-
-
-# ============================================================
-# CHECK AI CONNECTION
-# ============================================================
-
-def check_ai():
-
-    try:
-
-        client = get_ai_client()
-
-        client.list()
-
-        return True, "Connected successfully."
-
-    except Exception as e:
-
-        return False, str(e)
-
-
-# ============================================================
 # DATABASE
 # ============================================================
 
-def create_database():
+def get_connection():
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
 
-    conn = sqlite3.connect(DB_NAME)
+
+def init_database():
+
+    conn = get_connection()
 
     cursor = conn.cursor()
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS farm_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            location TEXT,
             record_date TEXT,
+            location TEXT,
             category TEXT,
             item TEXT,
             quantity REAL,
@@ -171,52 +104,153 @@ def create_database():
         )
     """)
 
-    cursor.execute(
-        "PRAGMA table_info(farm_records)"
-    )
+    # Upgrade old database if location column does not exist
+    cursor.execute("PRAGMA table_info(farm_records)")
+    columns = [row[1] for row in cursor.fetchall()]
 
-    columns = [
-        row[1]
-        for row in cursor.fetchall()
-    ]
+    if "location" not in columns:
 
-    required_columns = {
-
-        "location": "TEXT",
-        "record_date": "TEXT",
-        "category": "TEXT",
-        "item": "TEXT",
-        "quantity": "REAL",
-        "unit": "TEXT",
-        "income": "REAL",
-        "expense": "REAL",
-        "notes": "TEXT"
-
-    }
-
-    for column, data_type in required_columns.items():
-
-        if column not in columns:
-
-            cursor.execute(
-                f"""
-                ALTER TABLE farm_records
-                ADD COLUMN {column} {data_type}
-                """
-            )
+        cursor.execute("""
+            ALTER TABLE farm_records
+            ADD COLUMN location TEXT DEFAULT 'Jawalgiri'
+        """)
 
     conn.commit()
-
     conn.close()
 
 
+init_database()
+
+
 # ============================================================
-# ADD RECORD
+# OLLAMA CLOUD API KEY
+# ============================================================
+
+def get_ollama_api_key():
+
+    # First try Streamlit Secrets
+    try:
+        key = st.secrets.get("OLLAMA_API_KEY")
+
+        if key:
+            return str(key).strip()
+
+    except Exception:
+        pass
+
+    # Then environment variable
+    key = os.getenv("OLLAMA_API_KEY")
+
+    if key:
+        return key.strip()
+
+    return ""
+
+
+# ============================================================
+# OLLAMA CLOUD CHAT
+# ============================================================
+
+def ask_ollama(prompt, system_prompt=None):
+
+    api_key = get_ollama_api_key()
+
+    if not api_key:
+        raise RuntimeError(
+            "OLLAMA_API_KEY is missing. "
+            "Add OLLAMA_API_KEY in Streamlit Cloud → Settings → Secrets."
+        )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    messages = []
+
+    if system_prompt:
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
+
+    payload = {
+        "model": AI_MODEL,
+        "messages": messages,
+        "stream": False
+    }
+
+    try:
+
+        response = requests.post(
+            OLLAMA_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+
+        # Authentication error
+        if response.status_code == 401:
+
+            raise RuntimeError(
+                "Ollama Cloud returned 401 Unauthorized. "
+                "Your OLLAMA_API_KEY is invalid, expired, "
+                "or incorrectly configured."
+            )
+
+        # Other errors
+        if response.status_code != 200:
+
+            try:
+                error_data = response.json()
+                error_message = error_data.get(
+                    "error",
+                    response.text
+                )
+            except Exception:
+                error_message = response.text
+
+            raise RuntimeError(
+                f"Ollama Cloud error "
+                f"(HTTP {response.status_code}): "
+                f"{error_message}"
+            )
+
+        data = response.json()
+
+        if "message" not in data:
+            raise RuntimeError(
+                "Ollama returned an unexpected response."
+            )
+
+        return data["message"]["content"]
+
+    except requests.exceptions.Timeout:
+
+        raise RuntimeError(
+            "Ollama Cloud request timed out. "
+            "Please try again."
+        )
+
+    except requests.exceptions.ConnectionError:
+
+        raise RuntimeError(
+            "Could not connect to Ollama Cloud."
+        )
+
+
+# ============================================================
+# DATABASE FUNCTIONS
 # ============================================================
 
 def add_record(
-    location,
     record_date,
+    location,
     category,
     item,
     quantity,
@@ -226,15 +260,15 @@ def add_record(
     notes
 ):
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_connection()
 
     cursor = conn.cursor()
 
     cursor.execute("""
         INSERT INTO farm_records
         (
-            location,
             record_date,
+            location,
             category,
             item,
             quantity,
@@ -245,8 +279,8 @@ def add_record(
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
+        str(record_date),
         location,
-        record_date,
         category,
         item,
         quantity,
@@ -257,321 +291,55 @@ def add_record(
     ))
 
     conn.commit()
-
     conn.close()
 
 
-# ============================================================
-# GET RECORDS
-# ============================================================
+def get_records(location=None):
 
-def get_records(location):
+    conn = get_connection()
 
-    conn = sqlite3.connect(DB_NAME)
+    if location:
 
-    df = pd.read_sql_query(
-        """
-        SELECT *
-        FROM farm_records
-        WHERE location = ?
-        ORDER BY id DESC
-        """,
-        conn,
-        params=(location,)
-    )
+        df = pd.read_sql_query(
+            """
+            SELECT *
+            FROM farm_records
+            WHERE location = ?
+            ORDER BY id DESC
+            """,
+            conn,
+            params=(location,)
+        )
+
+    else:
+
+        df = pd.read_sql_query(
+            """
+            SELECT *
+            FROM farm_records
+            ORDER BY id DESC
+            """,
+            conn
+        )
 
     conn.close()
 
     return df
 
 
-# ============================================================
-# DELETE RECORD
-# ============================================================
-
 def delete_record(record_id):
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_connection()
 
     cursor = conn.cursor()
 
     cursor.execute(
-        """
-        DELETE FROM farm_records
-        WHERE id = ?
-        """,
+        "DELETE FROM farm_records WHERE id = ?",
         (record_id,)
     )
 
     conn.commit()
-
     conn.close()
-
-
-# ============================================================
-# GENERAL AI
-# ============================================================
-
-def ask_general_ai(
-    question,
-    history
-):
-
-    try:
-
-        client = get_ai_client()
-
-        messages = [
-
-            {
-                "role": "system",
-                "content": """
-You are a helpful general-purpose AI assistant.
-
-You are inside a Smart Farm Management application.
-
-You are NOT limited to farming.
-
-You can help with:
-
-- General knowledge
-- Business
-- Farming
-- Travel
-- Python
-- Streamlit
-- Technology
-- Education
-- Writing
-- Translation
-- Marketing
-- Business planning
-- Calculations
-- Ideas
-- General advice
-
-You do NOT have access to the user's private
-farm database in General AI mode.
-
-Do not pretend that you can see private farm records.
-
-Give practical and easy-to-understand answers.
-
-Use Indian Rupees (₹) when appropriate.
-"""
-            }
-
-        ]
-
-        for message in history:
-
-            messages.append({
-                "role": message["role"],
-                "content": message["content"]
-            })
-
-        messages.append({
-            "role": "user",
-            "content": question
-        })
-
-        response = client.chat(
-            model=AI_MODEL,
-            messages=messages
-        )
-
-        return response.message.content
-
-    except Exception as e:
-
-        return (
-            "❌ General AI Error\n\n"
-            f"{str(e)}\n\n"
-            "Please check your Ollama Cloud API "
-            "key and model configuration."
-        )
-
-
-# ============================================================
-# FARM AI
-# ============================================================
-
-def ask_farm_ai(
-    question,
-    location,
-    history
-):
-
-    df = get_records(location)
-
-    if df.empty:
-
-        return (
-            f"🌱 There are no records available "
-            f"for {location} yet."
-        )
-
-    try:
-
-        client = get_ai_client()
-
-        df = df.fillna("")
-
-        # ----------------------------------------------------
-        # Convert numeric columns
-        # ----------------------------------------------------
-
-        df["income"] = pd.to_numeric(
-            df["income"],
-            errors="coerce"
-        ).fillna(0)
-
-        df["expense"] = pd.to_numeric(
-            df["expense"],
-            errors="coerce"
-        ).fillna(0)
-
-        df["quantity"] = pd.to_numeric(
-            df["quantity"],
-            errors="coerce"
-        ).fillna(0)
-
-        # ----------------------------------------------------
-        # Totals
-        # ----------------------------------------------------
-
-        total_income = df["income"].sum()
-
-        total_expense = df["expense"].sum()
-
-        profit = (
-            total_income -
-            total_expense
-        )
-
-        total_records = len(df)
-
-        # ----------------------------------------------------
-        # Category summary
-        # ----------------------------------------------------
-
-        category_summary = df.groupby(
-            "category"
-        ).agg(
-            Income=("income", "sum"),
-            Expense=("expense", "sum"),
-            Records=("id", "count")
-        ).reset_index()
-
-        category_summary["Profit"] = (
-            category_summary["Income"]
-            -
-            category_summary["Expense"]
-        )
-
-        # ----------------------------------------------------
-        # Convert data to text
-        # ----------------------------------------------------
-
-        records_text = df.to_string(
-            index=False
-        )
-
-        summary_text = category_summary.to_string(
-            index=False
-        )
-
-        # ----------------------------------------------------
-        # Farm AI system message
-        # ----------------------------------------------------
-
-        messages = [
-
-            {
-                "role": "system",
-                "content": f"""
-You are Farm AI inside a Smart Farm Management System.
-
-CURRENT FARM LOCATION:
-{location}
-
-You have access ONLY to the farm records
-provided below.
-
-IMPORTANT RULES:
-
-1. Never invent farm figures.
-2. Use the actual records.
-3. Calculate totals when required.
-4. Use ₹ for Indian currency.
-5. Clearly explain calculations.
-6. If information is unavailable, say so.
-7. Recommendations must be clearly identified
-   as recommendations.
-8. Never use records from another location.
-
-FARM TOTALS:
-
-Total records:
-{total_records}
-
-Total income:
-₹{total_income:,.2f}
-
-Total expense:
-₹{total_expense:,.2f}
-
-Profit/Loss:
-₹{profit:,.2f}
-
-
-CATEGORY SUMMARY:
-
-{summary_text}
-
-
-DETAILED FARM RECORDS:
-
-{records_text}
-"""
-            }
-
-        ]
-
-        for message in history:
-
-            messages.append({
-                "role": message["role"],
-                "content": message["content"]
-            })
-
-        messages.append({
-            "role": "user",
-            "content": question
-        })
-
-        response = client.chat(
-            model=AI_MODEL,
-            messages=messages
-        )
-
-        return response.message.content
-
-    except Exception as e:
-
-        return (
-            "❌ Farm AI Error\n\n"
-            f"{str(e)}\n\n"
-            "Please check your Ollama Cloud API "
-            "key and model configuration."
-        )
-
-
-# ============================================================
-# CREATE DATABASE
-# ============================================================
-
-create_database()
 
 
 # ============================================================
@@ -579,164 +347,96 @@ create_database()
 # ============================================================
 
 if "location" not in st.session_state:
+    st.session_state.location = "Jawalgiri"
 
-    st.session_state.location = None
+if "general_messages" not in st.session_state:
+    st.session_state.general_messages = []
 
-
-if "general_ai_messages" not in st.session_state:
-
-    st.session_state.general_ai_messages = []
-
-
-if "farm_ai_messages" not in st.session_state:
-
-    st.session_state.farm_ai_messages = []
-
-
-# ============================================================
-# MAIN MENU
-# ============================================================
-
-if st.session_state.location is None:
-
-    st.title(
-        "🌱 Smart Farm Management System"
-    )
-
-    st.subheader(
-        "🏡 Main Menu"
-    )
-
-    st.write(
-        "Please select the farm location."
-    )
-
-    st.divider()
-
-    col1, col2, col3 = st.columns(3)
-
-    # --------------------------------------------------------
-    # Jawalgiri
-    # --------------------------------------------------------
-
-    with col1:
-
-        st.subheader(
-            "🌾 Jawalgiri"
-        )
-
-        if st.button(
-            "Open Jawalgiri",
-            use_container_width=True
-        ):
-
-            st.session_state.location = "Jawalgiri"
-
-            st.rerun()
-
-    # --------------------------------------------------------
-    # Devarabetta
-    # --------------------------------------------------------
-
-    with col2:
-
-        st.subheader(
-            "🌾 Devarabetta"
-        )
-
-        if st.button(
-            "Open Devarabetta",
-            use_container_width=True
-        ):
-
-            st.session_state.location = "Devarabetta"
-
-            st.rerun()
-
-    # --------------------------------------------------------
-    # Jakali
-    # --------------------------------------------------------
-
-    with col3:
-
-        st.subheader(
-            "🌾 Jakali"
-        )
-
-        if st.button(
-            "Open Jakali",
-            use_container_width=True
-        ):
-
-            st.session_state.location = "Jakali"
-
-            st.rerun()
-
-    st.divider()
-
-    st.info(
-        "Select a location to open the Smart Farm dashboard."
-    )
-
-    st.stop()
-
-
-# ============================================================
-# CURRENT LOCATION
-# ============================================================
-
-current_location = (
-    st.session_state.location
-)
+if "farm_messages" not in st.session_state:
+    st.session_state.farm_messages = []
 
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title(
-    "🌱 Smart Farm"
-)
+with st.sidebar:
 
-st.sidebar.success(
-    f"📍 Current Location:\n{current_location}"
-)
+    st.markdown(
+        "# 🌱 Smart Farm"
+    )
 
+    st.success(
+        f"📍 Current Location: "
+        f"{st.session_state.location}"
+    )
 
-if st.sidebar.button(
-    "🏠 Main Menu",
-    use_container_width=True
-):
+    if st.button(
+        "🏠 Main Menu",
+        use_container_width=True
+    ):
 
-    st.session_state.location = None
+        st.session_state.menu = "AI Assistant"
 
-    st.rerun()
+    st.markdown("---")
 
+    st.write("### Select Menu")
 
-menu = st.sidebar.radio(
+    menu = st.radio(
+        "",
+        [
+            "🤖 AI Assistant",
+            "📊 Dashboard",
+            "➕ Add Record",
+            "📋 View Records",
+            "🗑️ Delete Record"
+        ]
+    )
 
-    "Select Menu",
+    st.markdown("---")
 
-    [
-        "🤖 AI Assistant",
-        "📊 Dashboard",
-        "➕ Add Record",
-        "📋 View Records",
-        "🗑️ Delete Record"
-    ]
-)
+    st.markdown(
+        """
+        ### 🌱 Smart Farm Management
+
+        **☁️ Ollama Cloud General AI**
+
+        **🌱 Ollama Cloud Farm AI**
+
+        **🗄️ SQLite Database**
+        """
+    )
 
 
 # ============================================================
-# HEADER
+# LOCATION SELECTOR
 # ============================================================
 
-st.title(
-    "🌱 Smart Farm Management"
+st.sidebar.markdown("---")
+
+st.sidebar.write("### 📍 Farm Location")
+
+selected_location = st.sidebar.selectbox(
+    "Select location",
+    LOCATIONS,
+    index=LOCATIONS.index(
+        st.session_state.location
+    )
 )
+
+st.session_state.location = selected_location
+
+LOCATION = st.session_state.location
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.title("🌱 Smart Farm Management")
 
 st.caption(
-    f"📍 Location: {current_location}"
+    f"📍 Managing farm records for **{LOCATION}**"
 )
 
 
@@ -746,233 +446,75 @@ st.caption(
 
 if menu == "🤖 AI Assistant":
 
-    st.header(
-        "🤖 AI Assistant"
+    st.header("🤖 General AI")
+
+    st.caption(
+        "Ask anything. This mode does not access your farm records."
     )
 
-    # --------------------------------------------------------
-    # AI STATUS
-    # --------------------------------------------------------
+    # Display chat
+    for message in st.session_state.general_messages:
 
-    ai_ok, ai_message = check_ai()
+        with st.chat_message(message["role"]):
 
-    if ai_ok:
+            st.markdown(message["content"])
 
-        st.success(
-            f"🟢 AI is connected — {AI_MODEL}"
-        )
+    if st.button(
+        "🗑️ Clear General AI Chat",
+        key="clear_general"
+    ):
 
-    else:
+        st.session_state.general_messages = []
 
-        st.error(
-            "🔴 AI connection failed."
-        )
+        st.rerun()
 
-        st.warning(
-            "Check your Ollama API configuration."
-        )
-
-        st.code(
-            ai_message,
-            language="text"
-        )
-
-        st.info(
-            "In Streamlit Cloud, go to "
-            "Settings → Secrets and make sure "
-            "OLLAMA_API_KEY is configured."
-        )
-
-        st.stop()
-
-    st.divider()
-
-    # --------------------------------------------------------
-    # AI MODE
-    # --------------------------------------------------------
-
-    ai_mode = st.radio(
-
-        "Select AI Mode",
-
-        [
-            "🤖 General AI",
-            "🌱 Farm AI"
-        ],
-
-        horizontal=True
+    user_prompt = st.chat_input(
+        "Ask General AI anything..."
     )
 
-    st.divider()
+    if user_prompt:
 
-    # ========================================================
-    # GENERAL AI
-    # ========================================================
+        st.session_state.general_messages.append({
+            "role": "user",
+            "content": user_prompt
+        })
 
-    if ai_mode == "🤖 General AI":
+        with st.chat_message("user"):
+            st.markdown(user_prompt)
 
-        st.subheader(
-            "🤖 General AI"
-        )
+        with st.chat_message("assistant"):
 
-        st.caption(
-            "Ask anything. This mode does not access "
-            "your farm records."
-        )
+            with st.spinner("Thinking..."):
 
-        for message in (
-            st.session_state.general_ai_messages
-        ):
+                try:
 
-            with st.chat_message(
-                message["role"]
-            ):
+                    answer = ask_ollama(
+                        user_prompt,
+                        system_prompt="""
+You are a helpful general AI assistant.
 
-                st.write(
-                    message["content"]
-                )
+Answer clearly and accurately.
 
-        question = st.chat_input(
-            "Ask General AI anything..."
-        )
-
-        if question:
-
-            with st.chat_message(
-                "user"
-            ):
-
-                st.write(question)
-
-            with st.chat_message(
-                "assistant"
-            ):
-
-                with st.spinner(
-                    "🤖 Thinking..."
-                ):
-
-                    answer = ask_general_ai(
-                        question,
-                        st.session_state.general_ai_messages
+Do not claim to have access to the user's farm
+records in General AI mode.
+"""
                     )
 
-                st.write(answer)
+                    st.markdown(answer)
 
-            st.session_state.general_ai_messages.append(
-                {
-                    "role": "user",
-                    "content": question
-                }
-            )
+                    st.session_state.general_messages.append({
+                        "role": "assistant",
+                        "content": answer
+                    })
 
-            st.session_state.general_ai_messages.append(
-                {
-                    "role": "assistant",
-                    "content": answer
-                }
-            )
+                except Exception as e:
 
-            st.rerun()
+                    error_message = str(e)
 
-        st.divider()
-
-        if st.button(
-            "🗑️ Clear General AI Chat",
-            use_container_width=True
-        ):
-
-            st.session_state.general_ai_messages = []
-
-            st.rerun()
-
-    # ========================================================
-    # FARM AI
-    # ========================================================
-
-    else:
-
-        st.subheader(
-            f"🌱 Farm AI — {current_location}"
-        )
-
-        st.success(
-            f"Farm AI is connected to "
-            f"{current_location} records."
-        )
-
-        st.caption(
-            "Ask about income, expenses, profit, "
-            "categories, activities and farm performance."
-        )
-
-        for message in (
-            st.session_state.farm_ai_messages
-        ):
-
-            with st.chat_message(
-                message["role"]
-            ):
-
-                st.write(
-                    message["content"]
-                )
-
-        question = st.chat_input(
-            f"Ask Farm AI about "
-            f"{current_location}..."
-        )
-
-        if question:
-
-            with st.chat_message(
-                "user"
-            ):
-
-                st.write(question)
-
-            with st.chat_message(
-                "assistant"
-            ):
-
-                with st.spinner(
-                    "🌱 Analyzing farm records..."
-                ):
-
-                    answer = ask_farm_ai(
-                        question,
-                        current_location,
-                        st.session_state.farm_ai_messages
+                    st.error(
+                        f"❌ General AI Error\n\n"
+                        f"{error_message}"
                     )
-
-                st.write(answer)
-
-            st.session_state.farm_ai_messages.append(
-                {
-                    "role": "user",
-                    "content": question
-                }
-            )
-
-            st.session_state.farm_ai_messages.append(
-                {
-                    "role": "assistant",
-                    "content": answer
-                }
-            )
-
-            st.rerun()
-
-        st.divider()
-
-        if st.button(
-            "🗑️ Clear Farm AI Chat",
-            use_container_width=True
-        ):
-
-            st.session_state.farm_ai_messages = []
-
-            st.rerun()
 
 
 # ============================================================
@@ -982,102 +524,68 @@ if menu == "🤖 AI Assistant":
 elif menu == "📊 Dashboard":
 
     st.header(
-        f"📊 {current_location} Dashboard"
+        f"📊 {LOCATION} Farm Dashboard"
     )
 
-    df = get_records(
-        current_location
-    )
+    df = get_records(LOCATION)
 
     if df.empty:
 
         st.info(
-            f"No records available for "
-            f"{current_location}."
+            f"No farm records available for {LOCATION} yet."
         )
 
     else:
 
-        df["income"] = pd.to_numeric(
-            df["income"],
-            errors="coerce"
-        ).fillna(0)
+        total_income = df["income"].fillna(0).sum()
+        total_expense = df["expense"].fillna(0).sum()
 
-        df["expense"] = pd.to_numeric(
-            df["expense"],
-            errors="coerce"
-        ).fillna(0)
-
-        total_income = df["income"].sum()
-
-        total_expense = df["expense"].sum()
-
-        profit = (
-            total_income -
-            total_expense
-        )
-
-        total_records = len(df)
+        profit = total_income - total_expense
 
         col1, col2, col3, col4 = st.columns(4)
 
         col1.metric(
-            "💰 Total Income",
-            f"₹{total_income:,.2f}"
+            "📦 Records",
+            len(df)
         )
 
         col2.metric(
-            "💸 Total Expenses",
-            f"₹{total_expense:,.2f}"
+            "💰 Income",
+            f"₹{total_income:,.2f}"
         )
 
         col3.metric(
-            "📈 Profit / Loss",
-            f"₹{profit:,.2f}"
+            "💸 Expense",
+            f"₹{total_expense:,.2f}"
         )
 
         col4.metric(
-            "📝 Total Records",
-            total_records
+            "📈 Profit",
+            f"₹{profit:,.2f}"
         )
 
-        st.divider()
+        st.markdown("---")
 
-        st.subheader(
-            "📂 Category Summary"
+        st.subheader("Category Summary")
+
+        category_summary = (
+            df.groupby("category")
+            .agg(
+                Records=("id", "count"),
+                Income=("income", "sum"),
+                Expense=("expense", "sum")
+            )
+            .reset_index()
         )
-
-        category_summary = df.groupby(
-            "category"
-        ).agg(
-            Income=("income", "sum"),
-            Expense=("expense", "sum")
-        ).reset_index()
 
         category_summary["Profit"] = (
             category_summary["Income"]
-            -
-            category_summary["Expense"]
+            - category_summary["Expense"]
         )
 
         st.dataframe(
             category_summary,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.subheader(
-            "📊 Income vs Expense"
-        )
-
-        chart_data = (
-            category_summary
-            .set_index("category")
-            [["Income", "Expense"]]
-        )
-
-        st.bar_chart(
-            chart_data
+            use_container_width=True
         )
 
 
@@ -1088,12 +596,10 @@ elif menu == "📊 Dashboard":
 elif menu == "➕ Add Record":
 
     st.header(
-        f"➕ Add Record - {current_location}"
+        f"➕ Add Record - {LOCATION}"
     )
 
-    with st.form(
-        "farm_record_form"
-    ):
+    with st.form("add_record_form"):
 
         record_date = st.date_input(
             "Date",
@@ -1101,16 +607,12 @@ elif menu == "➕ Add Record":
         )
 
         category = st.selectbox(
-            "Farming Category",
+            "Category",
             CATEGORIES
         )
 
         item = st.text_input(
-            "Item / Activity",
-            placeholder=(
-                "Example: Ragi, Milk, Tractor, "
-                "Room booking, Restaurant meal"
-            )
+            "Item / Activity"
         )
 
         col1, col2 = st.columns(2)
@@ -1120,15 +622,14 @@ elif menu == "➕ Add Record":
             quantity = st.number_input(
                 "Quantity",
                 min_value=0.0,
-                value=0.0,
-                step=1.0
+                value=0.0
             )
 
         with col2:
 
-            unit = st.selectbox(
+            unit = st.text_input(
                 "Unit",
-                UNITS
+                placeholder="kg, litre, box, acre, etc."
             )
 
         col3, col4 = st.columns(2)
@@ -1136,26 +637,21 @@ elif menu == "➕ Add Record":
         with col3:
 
             income = st.number_input(
-                "Income (₹)",
+                "Income ₹",
                 min_value=0.0,
-                value=0.0,
-                step=100.0
+                value=0.0
             )
 
         with col4:
 
             expense = st.number_input(
-                "Expense (₹)",
+                "Expense ₹",
                 min_value=0.0,
-                value=0.0,
-                step=100.0
+                value=0.0
             )
 
         notes = st.text_area(
-            "Notes",
-            placeholder=(
-                "Enter additional information..."
-            )
+            "Notes"
         )
 
         submitted = st.form_submit_button(
@@ -1165,17 +661,17 @@ elif menu == "➕ Add Record":
 
         if submitted:
 
-            if item.strip() == "":
+            if not item.strip():
 
-                st.error(
-                    "Please enter an Item / Activity."
+                st.warning(
+                    "Please enter an item or activity."
                 )
 
             else:
 
                 add_record(
-                    current_location,
-                    str(record_date),
+                    record_date,
+                    LOCATION,
                     category,
                     item,
                     quantity,
@@ -1186,8 +682,7 @@ elif menu == "➕ Add Record":
                 )
 
                 st.success(
-                    f"✅ Record saved for "
-                    f"{current_location}!"
+                    f"✅ Record saved successfully for {LOCATION}."
                 )
 
 
@@ -1198,70 +693,36 @@ elif menu == "➕ Add Record":
 elif menu == "📋 View Records":
 
     st.header(
-        f"📋 Records - {current_location}"
+        f"📋 Farm Records - {LOCATION}"
     )
 
-    df = get_records(
-        current_location
-    )
+    df = get_records(LOCATION)
 
     if df.empty:
 
         st.info(
-            f"No records found for "
-            f"{current_location}."
+            "No records found."
         )
 
     else:
 
-        st.subheader(
-            "All Records"
-        )
+        display_columns = [
+            "id",
+            "record_date",
+            "location",
+            "category",
+            "item",
+            "quantity",
+            "unit",
+            "income",
+            "expense",
+            "notes"
+        ]
 
         st.dataframe(
-            df,
+            df[display_columns],
             use_container_width=True,
             hide_index=True
-        )
-
-        st.divider()
-
-        st.subheader(
-            "🔎 Filter Records"
-        )
-
-        selected_category = st.selectbox(
-            "Select Category",
-            ["All Categories"] + CATEGORIES
-        )
-
-        if selected_category == "All Categories":
-
-            filtered_df = df
-
-        else:
-
-            filtered_df = df[
-                df["category"] == selected_category
-            ]
-
-        st.dataframe(
-            filtered_df,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.download_button(
-            label="📥 Download Records as CSV",
-            data=filtered_df.to_csv(
-                index=False
-            ),
-            file_name=(
-                f"{current_location}"
-                "_farm_records.csv"
-            ),
-            mime="text/csv",
-            use_container_width=True
         )
 
 
@@ -1272,75 +733,206 @@ elif menu == "📋 View Records":
 elif menu == "🗑️ Delete Record":
 
     st.header(
-        f"🗑️ Delete Record - "
-        f"{current_location}"
+        f"🗑️ Delete Record - {LOCATION}"
     )
 
-    df = get_records(
-        current_location
-    )
+    df = get_records(LOCATION)
 
     if df.empty:
 
         st.info(
-            f"There are no records to delete "
-            f"for {current_location}."
+            "There are no records to delete."
         )
 
     else:
 
-        st.subheader(
-            "Existing Records"
+        record_ids = df["id"].tolist()
+
+        selected_id = st.selectbox(
+            "Select Record ID",
+            record_ids
         )
 
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True
+        selected_record = df[
+            df["id"] == selected_id
+        ].iloc[0]
+
+        st.write(
+            f"**Item:** {selected_record['item']}"
         )
 
-        st.divider()
+        st.write(
+            f"**Category:** {selected_record['category']}"
+        )
 
-        record_id = st.number_input(
-            "Enter Record ID to Delete",
-            min_value=1,
-            step=1
+        st.write(
+            f"**Date:** {selected_record['record_date']}"
         )
 
         if st.button(
-            "🗑️ Delete Record",
-            use_container_width=True
+            "🗑️ Delete Selected Record",
+            type="primary"
         ):
 
-            if record_id in df["id"].values:
+            delete_record(selected_id)
 
-                delete_record(
-                    record_id
-                )
+            st.success(
+                "Record deleted successfully."
+            )
 
-                st.success(
-                    f"Record {record_id} "
-                    "deleted successfully."
-                )
-
-                st.rerun()
-
-            else:
-
-                st.error(
-                    "Record ID not found."
-                )
+            st.rerun()
 
 
 # ============================================================
-# SIDEBAR FOOTER
+# FARM AI
 # ============================================================
 
-st.sidebar.divider()
+st.sidebar.markdown("---")
 
-st.sidebar.info(
-    "🌱 Smart Farm Management\n\n"
-    "🤖 Ollama Cloud General AI\n\n"
-    "🌱 Ollama Cloud Farm AI\n\n"
-    "💾 SQLite Database"
+farm_ai = st.sidebar.radio(
+    "🌱 Farm AI",
+    [
+        "Off",
+        "Ollama Cloud Farm AI"
+    ]
+)
+
+if farm_ai == "Ollama Cloud Farm AI":
+
+    st.sidebar.info(
+        f"Farm AI is using records from {LOCATION}"
+    )
+
+    st.header(
+        f"🌱 Ollama Cloud Farm AI — {LOCATION}"
+    )
+
+    farm_df = get_records(LOCATION)
+
+    if farm_df.empty:
+
+        farm_context = (
+            f"There are currently no records "
+            f"for {LOCATION}."
+        )
+
+    else:
+
+        # Limit context so the request remains manageable
+        context_df = farm_df.head(100)
+
+        farm_context = context_df.to_string(
+            index=False
+        )
+
+    for message in st.session_state.farm_messages:
+
+        with st.chat_message(message["role"]):
+
+            st.markdown(message["content"])
+
+    if st.button(
+        "🗑️ Clear Farm AI Chat",
+        key="clear_farm"
+    ):
+
+        st.session_state.farm_messages = []
+
+        st.rerun()
+
+    farm_prompt = st.chat_input(
+        f"Ask Farm AI about {LOCATION}..."
+    )
+
+    if farm_prompt:
+
+        st.session_state.farm_messages.append({
+            "role": "user",
+            "content": farm_prompt
+        })
+
+        with st.chat_message("user"):
+            st.markdown(farm_prompt)
+
+        with st.chat_message("assistant"):
+
+            with st.spinner(
+                "Analyzing your farm records..."
+            ):
+
+                system_prompt = f"""
+You are Smart Farm AI.
+
+You are assisting with the farm location:
+{LOCATION}
+
+You have access to the following farm records:
+
+{farm_context}
+
+Use these records when answering.
+
+If the records do not contain enough information,
+clearly say that.
+
+Do not invent farm data.
+
+Give practical and easy-to-understand answers.
+
+You can help with:
+- farm income
+- farm expenses
+- profit and loss
+- crops
+- vegetables
+- fruits
+- flowers
+- spices
+- dairy
+- beekeeping
+- mushroom farming
+- nursery
+- seed production
+- irrigation
+- machinery
+- labour
+- harvesting
+- storage
+- farm sales
+- homestay
+- restaurant
+"""
+
+                try:
+
+                    answer = ask_ollama(
+                        farm_prompt,
+                        system_prompt=system_prompt
+                    )
+
+                    st.markdown(answer)
+
+                    st.session_state.farm_messages.append({
+                        "role": "assistant",
+                        "content": answer
+                    })
+
+                except Exception as e:
+
+                    st.error(
+                        f"❌ Farm AI Error\n\n"
+                        f"{str(e)}"
+                    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.markdown("---")
+
+st.caption(
+    "🌱 Smart Farm Management | "
+    "Ollama Cloud AI | "
+    f"Current Location: {LOCATION}"
 )
